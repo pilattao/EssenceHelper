@@ -19,6 +19,12 @@ public sealed class EssencePriceTable
             ? 1.0
             : overview.Core?.Rates?.Exalted ?? 0.0;
 
+        // If the exalted conversion rate is unavailable, don't emit a table full of
+        // zero-priced essences (that would silently mask the problem). Leave it empty
+        // so callers treat the source as unusable and fall back to another source.
+        if (multiplier <= 0)
+            return;
+
         var lineById = new Dictionary<string, ExchangeLine>(StringComparer.Ordinal);
         foreach (var line in overview.Lines)
             if (line?.Id != null)

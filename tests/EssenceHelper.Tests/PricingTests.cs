@@ -29,10 +29,24 @@ public class PricingTests
     public async Task PriceTable_resolves_known_essence_in_exalts()
     {
         var overview = await LocalNinjaSource.LoadAsync(SamplePath);
+        Assert.NotNull(overview);
         var table = new EssencePriceTable(overview!);
 
         // Essence of Delirium: primaryValue 0.04495 * rates.exalted 141.8 ~= 6.37 ex
         var value = table.GetExaltedValue("Essence of Delirium");
+        Assert.InRange(value, 6.0, 6.8);
+    }
+
+    [Fact]
+    public async Task PriceTable_resolves_via_substring_fallback()
+    {
+        var overview = await LocalNinjaSource.LoadAsync(SamplePath);
+        Assert.NotNull(overview);
+        var table = new EssencePriceTable(overview!);
+
+        // "Delirium" is not an exact key; the contains-both fallback should match
+        // "Essence of Delirium" (~6.37 ex).
+        var value = table.GetExaltedValue("Delirium");
         Assert.InRange(value, 6.0, 6.8);
     }
 
