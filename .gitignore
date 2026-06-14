@@ -131,3 +131,6 @@ $RECYCLE.BIN/
 .DS_Store
 
 _NCrunch*
+
+# Local-only ExileCore2 reference assemblies (proprietary — never commit)
+lib/

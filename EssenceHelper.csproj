@@ -1,8 +1,9 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net8.0-windows</TargetFramework>
     <OutputType>Library</OutputType>
-    <UseWindowsForms>true</UseWindowsForms>
+    <!-- Allows building the windows-targeted plugin on Linux/CI (no-op on Windows). -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <PlatformTarget>x64</PlatformTarget>
     <LangVersion>latest</LangVersion>
     <DebugType>embedded</DebugType>
@@ -10,7 +11,17 @@
     <EmbedAllSources>true</EmbedAllSources>
     <OutputPath Condition="'$(ExApiPluginOutputPath)' != ''">$(ExApiPluginOutputPath)$(MSBuildProjectName)</OutputPath>
     <Nullable>enable</Nullable>
+    <AssemblyName>EssenceHelper</AssemblyName>
+    <RootNamespace>EssenceHelper</RootNamespace>
   </PropertyGroup>
+
+  <!-- The unit-test project lives under tests/ inside this project's cone; keep the SDK glob
+       from pulling its files (and xunit refs) into the plugin assembly. -->
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+    <Content Remove="tests\**\*" />
+    <None Remove="tests\**\*" />
+  </ItemGroup>
 
   <ItemGroup>
     <Reference Include="ExileCore2">
@@ -30,11 +41,5 @@
   <ItemGroup>
     <PackageReference Include="ImGui.NET" Version="1.90.0.1" />
     <PackageReference Include="System.Net.Http.Json" Version="8.0.0" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Content Include="images\*.png">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
   </ItemGroup>
 </Project>
