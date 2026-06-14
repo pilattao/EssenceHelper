@@ -214,7 +214,7 @@ namespace EssenceHelper
             return NormalizeLeague(raw);
         }
 
-        private static string NormalizeLeague(string raw)
+        private static string NormalizeLeague(string? raw)
         {
             if (string.IsNullOrWhiteSpace(raw))
                 return "Standard";
