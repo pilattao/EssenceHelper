@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Numerics;
+using System.Threading;
 using System.Threading.Tasks;
 using ExileCore2;
 using ExileCore2.Shared;
@@ -30,7 +31,7 @@ namespace EssenceHelper
             new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
         private readonly HttpClient _httpClient = new();
         private DateTime _lastEssenceCacheUpdate = DateTime.MinValue;
-        private volatile bool _isUpdatingEssencePrices = false;
+        private int _isUpdatingEssencePrices = 0; // 0 = idle, 1 = a refresh is running (Interlocked)
         private DateTime _lastAutoCorruptTime = DateTime.MinValue;
         private bool _autoMode = true;                // auto-pick source until the user toggles manually
         private bool _suppressToggleHandler = false;  // guard OnValueChanged re-entrancy on programmatic changes
@@ -197,7 +198,7 @@ namespace EssenceHelper
 
         private bool ShouldUpdateEssencePrices()
         {
-            if (_isUpdatingEssencePrices) return false;
+            if (Volatile.Read(ref _isUpdatingEssencePrices) != 0) return false;
             if (GameController?.InGame != true) return false; // need league/bridge readable
             var interval = TimeSpan.FromMinutes(Settings.ApiUpdateInterval.Value);
             return DateTime.Now - _lastEssenceCacheUpdate >= interval;
@@ -226,15 +227,15 @@ namespace EssenceHelper
 
         private async Task UpdateEssencePrices()
         {
-            if (_isUpdatingEssencePrices) return;
-            _isUpdatingEssencePrices = true;
+            if (Interlocked.CompareExchange(ref _isUpdatingEssencePrices, 1, 0) != 0) return;
             try
             {
                 // Source + league were resolved on the main thread before this Task was queued.
                 var league = _currentLeague;
+                var useNinja = Settings.UseNinjaPricer.Value;
                 ExchangeOverview overview = null;
 
-                if (Settings.UseNinjaPricer.Value)
+                if (useNinja)
                 {
                     var path = GetNinjaPricerEssencesPath(league);
                     overview = await LocalNinjaSource.LoadAsync(path);
@@ -263,7 +264,7 @@ namespace EssenceHelper
                 _essencePriceCache = newCache;
 
                 _lastEssenceCacheUpdate = DateTime.Now;
-                LogMessage($"Updated essence prices: {_essencePriceCache.Count} essences cached ({(Settings.UseNinjaPricer.Value ? "NinjaPricer" : "poe.ninja API")})");
+                LogMessage($"Updated essence prices: {_essencePriceCache.Count} essences cached ({(useNinja ? "NinjaPricer" : "poe.ninja API")})");
             }
             catch (Exception ex)
             {
@@ -271,7 +272,7 @@ namespace EssenceHelper
             }
             finally
             {
-                _isUpdatingEssencePrices = false;
+                Interlocked.Exchange(ref _isUpdatingEssencePrices, 0);
             }
         }
 
@@ -634,14 +635,16 @@ namespace EssenceHelper
         {
             if (string.IsNullOrEmpty(essenceName)) return 0;
 
+            var cache = _essencePriceCache;
+
             // exact match - fastest path
-            if (_essencePriceCache.TryGetValue(essenceName, out var exactPrice))
+            if (cache.TryGetValue(essenceName, out var exactPrice))
             {
                 return exactPrice;
             }
 
             // optimized partial match - avoid LINQ allocation
-            foreach (var kvp in _essencePriceCache)
+            foreach (var kvp in cache)
             {
                 if (kvp.Key.Contains(essenceName, _essenceComparison) ||
                     essenceName.Contains(kvp.Key, _essenceComparison))
