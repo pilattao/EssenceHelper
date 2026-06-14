@@ -62,7 +62,10 @@ Port the poe.ninja exchange model from
 **Price lookup by name** (`PriceService`):
 
 - Build `LinesByName` by joining `items` (name↔id) with `lines` (id↔primaryValue) on `id`.
-  Do NOT rely on a serialized `LinesByName` field — raw poe.ninja API responses don't include it.
+  Do NOT rely on a serialized `LinesByName` field. The raw poe.ninja API response has only
+  `core`/`lines`/`items`; NinjaPricer's saved files additionally contain a serialized `LinesByName`
+  of C# tuples (`{Item1, Item2}`) plus `core.items` — both are deliberately ignored (System.Text.Json
+  drops unmapped properties by default). Building the map ourselves works identically for files and API.
 - Exalt value = `line.primaryValue * (core.primary == "exalted" ? 1 : core.rates.exalted)`.
 - Name matching: exact first, then the existing contains-both fallback (kept from current plugin).
 

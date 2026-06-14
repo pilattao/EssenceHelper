@@ -491,11 +491,12 @@ namespace EssenceHelper
         [Menu("Auto corrupt", "Use Vaal Orb on the Essence")]
         public ToggleNode AutoCorrupt { get; set; } = new(false);
 
+        // NOTE: RangeNode is new(value, min, max); the original plugin had value < min (broken slider).
         [Menu("Maximum price in exalts to auto corrupt")]
-        public RangeNode<int> MaximumPriceToAutoCorrupt { get; set; } = new(1, 5, 1000);
+        public RangeNode<int> MaximumPriceToAutoCorrupt { get; set; } = new(100, 1, 1000);
 
         [Menu("Minimum distance to essence to auto corrupt")]
-        public RangeNode<int> MinimumDistanceToEssenceToAutoCorrupt { get; set; } = new(0, 50, 1000);
+        public RangeNode<int> MinimumDistanceToEssenceToAutoCorrupt { get; set; } = new(50, 0, 1000);
 
         [Menu("Restore mouse to original position", "Restore mouse to original position after auto corrupt")]
         public ToggleNode RestoreMouseToOriginalPosition { get; set; } = new(true);
@@ -555,13 +556,17 @@ namespace EssenceHelper
     public class EssenceHelper : BaseSettingsPlugin<Settings>
     {
         private readonly ConcurrentDictionary<RectangleF, bool?> _mouseStateForRect = new();
-        private readonly ConcurrentDictionary<string, decimal> _essencePriceCache = new();
+        // Swappable snapshot (build-and-swap) so readers never see a half-cleared map.
+        private volatile IReadOnlyDictionary<string, decimal> _essencePriceCache =
+            new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
         private readonly HttpClient _httpClient = new();
         private DateTime _lastEssenceCacheUpdate = DateTime.MinValue;
         private volatile bool _isUpdatingEssencePrices = false;
         private DateTime _lastAutoCorruptTime = DateTime.MinValue;
-        private bool _startupSelectionDone = false;
+        private bool _autoMode = true;                // auto-pick source until the user toggles manually
+        private bool _suppressToggleHandler = false;  // guard OnValueChanged re-entrancy on programmatic changes
         private string _sourceStatus = "Initializing...";
+        private volatile string _currentLeague = "Standard"; // resolved on the main thread, read by the worker
         private readonly StringComparison _essenceComparison = StringComparison.OrdinalIgnoreCase;
 
         private readonly List<(Entity entity, LabelOnGround label, string EssenceName, Vector2 Position)> _reusableEssencesList = new();
@@ -576,22 +581,26 @@ namespace EssenceHelper
         {
             _lastEssenceCacheUpdate = DateTime.MinValue;
 
-            // Re-validate when the user tries to turn NinjaPricer ON: only allow if it is loaded.
+            // User interacting with the toggle = manual control. Turning NinjaPricer ON is only
+            // allowed when it is actually loaded; otherwise we reject and stay on the API.
             // Read .Value (not the lambda arg) — node OnValueChanged arg types vary across node kinds.
             Settings.UseNinjaPricer.OnValueChanged += (_, _) =>
             {
-                if (!_startupSelectionDone) return; // startup sets this itself
+                if (_suppressToggleHandler) return; // ignore our own programmatic changes
+                _autoMode = false;                  // user took manual control
+
                 if (Settings.UseNinjaPricer.Value && !NinjaPricerDetector.IsLoaded(GameController))
                 {
+                    _suppressToggleHandler = true;
                     Settings.UseNinjaPricer.Value = false; // reject the switch
+                    _suppressToggleHandler = false;
                     _sourceStatus = "NinjaPricer plugin not detected — staying on poe.ninja API";
                     LogMessage(_sourceStatus);
+                    return;
                 }
-                else
-                {
-                    UpdateSourceStatus();
-                    _ = Task.Run(UpdateEssencePrices);
-                }
+
+                UpdateSourceStatus();
+                _ = Task.Run(UpdateEssencePrices);
             };
 
             return true;
@@ -610,6 +619,8 @@ namespace EssenceHelper
 
             if (ImGui.Button("Update Essence Prices Now"))
             {
+                MaybeAutoDetectSource(); // main thread: refresh detection (auto mode)
+                UpdateSourceStatus();    // main thread: refresh league/status before the worker reads _currentLeague
                 _ = Task.Run(UpdateEssencePrices);
             }
 
@@ -630,20 +641,16 @@ namespace EssenceHelper
 
 (`DrawEssencePriceList()` is unchanged — keep it.)
 
-- [ ] **Step 4: Replace `Render()` (was lines ~147-168) and add startup auto-select**
+- [ ] **Step 4: Replace `Render()` (was lines ~147-168) and add source-detection helpers**
 
 ```csharp
         public override void Render()
         {
             if (!Settings.Enable) return;
 
-            if (!_startupSelectionDone)
-            {
-                RunStartupSourceSelection();
-            }
-
             if (ShouldUpdateEssencePrices())
             {
+                MaybeAutoDetectSource(); // main thread: detect NinjaPricer + resolve league + status
                 _ = Task.Run(UpdateEssencePrices);
             }
 
@@ -659,24 +666,29 @@ namespace EssenceHelper
             }
         }
 
-        private void RunStartupSourceSelection()
+        // While in auto mode, keep the selected source in sync with NinjaPricer's presence.
+        // This handles NinjaPricer registering its PluginBridge method AFTER EssenceHelper loads.
+        // Once the user toggles the source manually (_autoMode = false), we stop overriding it.
+        private void MaybeAutoDetectSource()
         {
-            // Wait until we are in game so league/bridge are readable.
-            if (GameController?.InGame != true) return;
-
+            if (!_autoMode) return;
             var detected = NinjaPricerDetector.IsLoaded(GameController);
-            Settings.UseNinjaPricer.Value = detected;
-            _startupSelectionDone = true;
+            if (Settings.UseNinjaPricer.Value != detected)
+            {
+                _suppressToggleHandler = true;
+                Settings.UseNinjaPricer.Value = detected;
+                _suppressToggleHandler = false;
+            }
             UpdateSourceStatus();
-            _ = Task.Run(UpdateEssencePrices);
         }
 
+        // Always called on the main thread (Render / DrawSettings) — safe to read game memory here.
         private void UpdateSourceStatus()
         {
-            var league = ResolveLeague();
+            _currentLeague = ResolveLeague();
             _sourceStatus = Settings.UseNinjaPricer.Value
-                ? $"NinjaPricer detected — using its price data (league: {league})"
-                : $"NinjaPricer not used — fetching from poe.ninja API (league: {league})";
+                ? $"NinjaPricer detected — using its price data (league: {_currentLeague})"
+                : $"NinjaPricer not used — fetching from poe.ninja API (league: {_currentLeague})";
         }
 ```
 
@@ -688,7 +700,7 @@ Delete all of those and replace with:
         private bool ShouldUpdateEssencePrices()
         {
             if (_isUpdatingEssencePrices) return false;
-            if (!_startupSelectionDone) return false;
+            if (GameController?.InGame != true) return false; // need league/bridge readable
             var interval = TimeSpan.FromMinutes(Settings.ApiUpdateInterval.Value);
             return DateTime.Now - _lastEssenceCacheUpdate >= interval;
         }
@@ -720,7 +732,8 @@ Delete all of those and replace with:
             _isUpdatingEssencePrices = true;
             try
             {
-                var league = ResolveLeague();
+                // Source + league were resolved on the main thread before this Task was queued.
+                var league = _currentLeague;
                 ExchangeOverview overview = null;
 
                 if (Settings.UseNinjaPricer.Value)
@@ -745,9 +758,11 @@ Delete all of those and replace with:
                 }
 
                 var table = new EssencePriceTable(overview);
-                _essencePriceCache.Clear();
+                // Build a fresh map and swap the reference atomically (no half-cleared reads).
+                var newCache = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
                 foreach (var kvp in table.ExaltByName)
-                    _essencePriceCache[kvp.Key] = (decimal)kvp.Value;
+                    newCache[kvp.Key] = (decimal)kvp.Value;
+                _essencePriceCache = newCache;
 
                 _lastEssenceCacheUpdate = DateTime.Now;
                 LogMessage($"Updated essence prices: {_essencePriceCache.Count} essences cached ({(Settings.UseNinjaPricer.Value ? "NinjaPricer" : "poe.ninja API")})");
@@ -780,7 +795,11 @@ Delete all of those and replace with:
                     if (dirs.Length == 1)
                     {
                         var alt = Path.Combine(dirs[0], "Essences.json");
-                        if (File.Exists(alt)) return alt;
+                        if (File.Exists(alt))
+                        {
+                            LogMessage($"League '{league}' folder not found; using the only available league folder '{Path.GetFileName(dirs[0])}'");
+                            return alt;
+                        }
                     }
                 }
                 return path;
@@ -862,6 +881,16 @@ And add a new `<ItemGroup>`:
     <None Remove="tests\**\*" />
   </ItemGroup>
 ```
+
+Notes:
+- The plugin csproj's `OutputPath` ends with `$(MSBuildProjectName)`, so renaming the file to
+  `EssenceHelper.csproj` is what makes the output folder `EssenceHelper` (ExileCore2 loads plugins by
+  folder/dll name). The explicit `<AssemblyName>` just pins the dll name to match.
+- The `<Compile Remove="tests/**">` exclusion prevents the SDK's default glob from compiling the test
+  files into the plugin assembly on Windows. This is **only verifiable on Windows** (the plugin csproj
+  can't build on Linux). On Linux we only confirm the separate test csproj builds in isolation
+  (Step 3). If a Windows build ever reports duplicate/`xunit` compile errors, this exclusion is the
+  first thing to check.
 
 - [ ] **Step 3: Confirm the test project still builds in isolation**
 
