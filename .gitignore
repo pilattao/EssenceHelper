@@ -134,3 +134,6 @@ _NCrunch*
 
 # Local-only ExileCore2 reference assemblies (proprietary — never commit)
 lib/
+
+# Design/process docs — local only, not needed for the plugin to run.
+docs/
